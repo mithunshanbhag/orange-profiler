@@ -1,0 +1,1416 @@
+///////////////////////////////////////////////////////////////////////////////
+// TraceAnalysisCmds.cs : Implements commands to analyze snapshots in        //
+//                        a given trace file.                                //
+// Application          : CLR V4 Profiler Test Infrastructure                //
+// Author               : Mithun Shanbhag, mithuns@microsoft.com             //
+///////////////////////////////////////////////////////////////////////////////
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Xml;
+using System.Xml.Schema;
+using System.Xml.Linq;
+using System.IO;
+using System.Reflection;
+using Win32Wrapper;
+using CorProfWrapper;
+
+namespace OrangeClient
+{
+    ////////////////////////////////////////
+    // ----< class ClassInfoComparer >----//
+    ////////////////////////////////////////
+
+    public class ClassInfoComparer : IEqualityComparer<XElement>
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="x"></param>
+        /// <param name="y"></param>
+        /// <returns></returns>
+        public bool Equals(XElement x, XElement y)
+        {
+            return (x.Attribute("i").Value.Equals(y.Attribute("i").Value) 
+                    && x.Attribute("m").Value.Equals(y.Attribute("m").Value)
+                    && x.Attribute("n").Value.Equals(y.Attribute("n").Value));
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="c"></param>
+        /// <returns></returns>
+        public int GetHashCode(XElement c)
+        {
+            return c.Attribute("i").Value.GetHashCode();
+        }
+    }
+
+    ////////////////////////////////
+    // ----< class ClassInfo >----//
+    ////////////////////////////////
+
+    #region ClassInfo
+
+    public class ClassInfo : IEquatable<ClassInfo>, IComparable<ClassInfo>
+    {
+        /// <summary>
+        /// /
+        /// </summary>
+        /// <param name="classinfo"></param>
+        public ClassInfo(XElement classinfo)
+        {
+            m_Id = Convert.ToUInt64((classinfo.Attribute("i").Value), 16);
+            m_moduleId = Convert.ToUInt64((classinfo.Attribute("m").Value), 16);
+            m_ClassName = classinfo.Attribute("n").Value;
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 Id
+        {
+            get { return m_Id; }
+        }
+        
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 ModuleId
+        {
+            get { return m_moduleId; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public string ClassName
+        {
+            get { return m_ClassName; }
+        }
+
+        /// <summary>
+        /// Implementing the IEquatable<T> interface
+        /// </summary>
+        /// <param name="ci"></param>
+        /// <returns></returns>
+        public bool Equals(ClassInfo ci)
+        { 
+            return (null == ci)
+                ? false
+                : (this.Id == ci.Id
+                  && this.ModuleId == ci.ModuleId
+                  && this.ClassName.Equals(ci.ClassName, StringComparison.InvariantCultureIgnoreCase));
+        }
+
+        /// <summary>
+        /// Overriding the Object.Equals while implementing the IEquatable<T> interface
+        /// </summary>
+        /// <param name="obj"></param>
+        /// <returns></returns>
+        public override bool Equals(object obj)
+        {
+            if (null == obj)
+                return false;
+
+            return (obj is ClassInfo)
+                ? this.Equals(obj)
+                : false;
+        }
+
+        /// <summary>
+        /// Overriding Object.GetHashCode() while implementing the IEquatable<T> interface
+        /// </summary>
+        /// <returns></returns>
+        public override int GetHashCode()
+        {
+            return this.ClassName.GetHashCode();
+        }
+
+        /// <summary>
+        /// Implementing the IComparable<T> interface
+        /// </summary>
+        /// <param name="ci"></param>
+        /// <returns></returns>
+        public int CompareTo(ClassInfo ci)
+        {
+            if (!(this.Id == ci.Id))
+                return this.Id.CompareTo(ci.Id);
+
+            if (!(this.ClassName.Equals(ci.ClassName)))
+                return string.Compare(this.ClassName, ci.ClassName, StringComparison.InvariantCultureIgnoreCase);
+ 
+            return this.ModuleId.CompareTo(ci.ModuleId);
+        }
+
+
+        private UInt64 m_Id;
+        private UInt64 m_moduleId;
+        private string m_ClassName;
+    }
+
+    #endregion // ClassInfo
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    /////////////////////////////////
+    // ----< class ModuleInfo >----//
+    /////////////////////////////////
+
+    #region ModuleInfo
+
+    public class ModuleInfo 
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="moduleinfo"></param>
+        public ModuleInfo(XElement moduleinfo)
+        {
+            m_moduleId = Convert.ToUInt64((moduleinfo.Attribute("i").Value), 16);
+            m_moduleName = moduleinfo.Attribute("n").Value;
+            m_assemblyId = Convert.ToUInt64((moduleinfo.Attribute("as").Value), 16);
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 ModuleId
+        {
+            get { return m_moduleId;  }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public String ModuleName
+        {
+            get { return m_moduleName;  }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 AssemblyId
+        {
+            get { return m_assemblyId; }
+        }
+
+
+        private UInt64 m_moduleId;
+        private string m_moduleName;
+        private UInt64 m_assemblyId;
+    }
+
+    #endregion // ModuleInfo
+
+    ///////////////////////////////////////////////////////////////////////////
+
+
+    ////////////////////////////////////
+    // ----< class RootReference >----//
+    ////////////////////////////////////
+
+    #region RootReference
+
+    public class RootReference
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="rootref"></param>
+        public RootReference(XElement rootref)
+        {
+            m_rootId = Convert.ToUInt64((rootref.Attribute("ro").Value), 16);
+            m_refId = Convert.ToUInt64((rootref.Attribute("re").Value), 16);
+            m_rootKind = Convert.ToUInt64((rootref.Attribute("k").Value), 16);
+            m_rootFlag = Convert.ToUInt64((rootref.Attribute("f").Value), 16);
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RootId
+        {
+            get { return m_rootId; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 ReferencedObjectId
+        {
+            get { return m_refId; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RootKind
+        {
+            get { return m_rootKind; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RootFlag
+        {
+            get { return m_rootFlag; }
+        }
+
+
+        private UInt64 m_rootId;
+        private UInt64 m_refId;
+        private UInt64 m_rootKind;
+        private UInt64 m_rootFlag;
+    }
+
+    #endregion // RootReference
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    //////////////////////////////
+    // ----< class VARange >----//
+    //////////////////////////////
+
+    #region VARange
+
+    public class VARange
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="range"></param>
+        public VARange(XElement range)
+        { 
+            m_baseAddress = Convert.ToUInt64((range.Attribute("b").Value), 16);
+            m_regionSize = Convert.ToUInt64((range.Attribute("r").Value), 16);
+            m_memoryState = Convert.ToUInt64((range.Attribute("s").Value), 16);
+            m_memoryProtection = Convert.ToUInt64((range.Attribute("p").Value), 16);
+            m_memoryType = Convert.ToUInt64((range.Attribute("t").Value), 16);            
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 BaseAddress
+        {
+            get { return m_baseAddress; } 
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RegionSize
+        {
+            get { return m_regionSize; }
+        }
+        
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 MemoryState
+        {
+            get { return m_memoryState; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 MemoryProtection
+        {
+            get { return m_memoryProtection; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 MemoryType
+        {
+            get { return m_memoryType; }
+        }
+
+
+        private UInt64 m_baseAddress;
+        private UInt64 m_regionSize;
+        private UInt64 m_memoryState;
+        private UInt64 m_memoryProtection;
+        private UInt64 m_memoryType;
+    }
+
+    #endregion // VARange
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    /////////////////////////////////
+    // ----< class ObjectInfo >----//
+    /////////////////////////////////
+
+    #region ObjectInfo
+
+    public class ObjectInfo
+    {
+        public ObjectInfo(XElement objInfo)
+        {
+            m_objectId = Convert.ToUInt64(objInfo.Attribute("i").Value, 16);
+            m_classId = Convert.ToUInt64(objInfo.Attribute("c").Value, 16);
+            m_size = Convert.ToUInt64(objInfo.Attribute("s").Value, 16);
+            m_generation = Convert.ToUInt64(objInfo.Attribute("g").Value, 16);
+
+            var refObjs = objInfo.Elements("r");
+            foreach (var refObj in refObjs)
+            {
+                m_refObjs.Add(Convert.ToUInt64(refObj.Value, 16));
+            }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 ObjectId
+        {
+            get { return m_objectId; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 ClassId
+        {
+            get { return m_classId; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 AlignedSize
+        {
+            get { return m_size; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 Generation
+        {
+            get { return m_generation; }
+        }
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<UInt64> ReferencedObjects
+        {
+            get { return m_refObjs; }
+        }
+
+        private UInt64 m_objectId;
+        private UInt64 m_classId;
+        private UInt64 m_size;
+        private UInt64 m_generation;
+        private List<UInt64> m_refObjs = new List<UInt64>();
+    }
+
+    #endregion // ObjectInfo
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    ////////////////////////////
+    //// ----< class Obj >----//
+    ////////////////////////////
+
+    //#region Obj
+
+    //public class Obj : IEquatable<Obj>, IComparable<Obj>
+    //{ 
+    //    /// <summary>
+    //    /// 
+    //    /// </summary>
+    //    /// <param name="obj"></param>
+    //    public Obj(XElement obj)
+    //    {
+    //        m_id = Convert.ToUInt64(obj.Attribute("i").Value, 16);
+    //    }
+
+    //    /// <summary>
+    //    /// 
+    //    /// </summary>
+    //    public UInt64 Id
+    //    {
+    //        get { return m_id; }
+    //    }
+
+
+    //    /// <summary>
+    //    /// Implementing the IEquatable<T> interface
+    //    /// </summary>
+    //    /// <param name="obj"></param>
+    //    /// <returns></returns>
+    //    public bool Equals(Obj obj)
+    //    {
+    //        return (null == obj) 
+    //            ? false
+    //            : (this.Id == obj.Id
+    //                && this.Generation == obj.Generation
+    //                && this.AlignedSize == obj.AlignedSize);
+    //    }
+
+    //    /// <summary>
+    //    /// Overriding Object.Equals while implementing the IEquatable<T> interface
+    //    /// </summary>
+    //    /// <param name="obj"></param>
+    //    /// <returns></returns>
+    //    public override bool Equals(object obj)
+    //    {
+    //        if (null == obj)
+    //            return false;
+
+    //        return (obj is Obj)
+    //            ? this.Equals(obj)
+    //            : false;
+    //    }
+
+    //    /// <summary>
+    //    /// Overriding Object.GetHashCode while implementing the IEquatable<T> interface
+    //    /// </summary>
+    //    /// <returns></returns>
+    //    public override int GetHashCode()
+    //    {
+    //        return this.Id.GetHashCode();
+    //    }
+
+    //    /// <summary>
+    //    /// Implementing the IComparable<T> interface
+    //    /// </summary>
+    //    /// <param name="obj"></param>
+    //    /// <returns></returns>
+    //    public int CompareTo(Obj obj)
+    //    {
+    //        if (!(this.Id == obj.Id))
+    //            return this.Id.CompareTo(obj.Id);
+
+    //        if (!(this.Generation == obj.Generation))
+    //            return this.Generation.CompareTo(obj.Generation);
+
+    //        return this.AlignedSize.CompareTo(obj.AlignedSize);
+    //    }
+
+
+    //    private UInt64 m_id;
+    //}
+
+    //#endregion // Obj
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    /////////////////////////////////
+    // ----< class Generation >----//
+    /////////////////////////////////
+
+    #region Generation
+
+    public class Generation
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="generation"></param>
+        public Generation(XElement generation)
+        {
+            m_gen = Convert.ToUInt64(generation.Attribute("g").Value.Substring(2), 16);
+            m_rangeStart = Convert.ToUInt64(generation.Attribute("rs").Value.Substring(2), 16);
+            m_rangeLength = Convert.ToUInt64(generation.Attribute("rl").Value.Substring(2), 16);
+            m_rangeLengthReserved = Convert.ToUInt64(generation.Attribute("rlr").Value.Substring(2), 16);
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 Gen
+        {
+            get { return m_gen; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RangeStart
+        {
+            get { return m_rangeStart;  }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RangeLength
+        {
+            get { return m_rangeLength;  } 
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public UInt64 RangeLengthReserved
+        {
+            get { return m_rangeLengthReserved; }
+        }
+
+
+        private UInt64 m_gen;
+        private UInt64 m_rangeStart;
+        private UInt64 m_rangeLength;
+        private UInt64 m_rangeLengthReserved;
+    }
+
+    #endregion // Generation
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    ///////////////////////////////
+    // ----< class Snapshot >----//
+    ///////////////////////////////
+
+    #region Snapshot
+
+    public sealed class Snapshot
+    {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="snapshot"></param>
+        public Snapshot(XElement snapshot)
+        {
+            var gens = snapshot.Elements("gen");
+            foreach (var gen in gens)
+                m_generations.Add(new Generation(gen));
+
+            var objInfos = snapshot.Elements("o");
+            foreach (var objInfo in objInfos)
+                m_objectInfos.Add(new ObjectInfo(objInfo));
+
+            var va_ranges = snapshot.Elements("va");
+            foreach (var va_range in va_ranges)
+                m_va_ranges.Add(new VARange(va_range));
+
+            var rootRefs = snapshot.Elements("rr");
+            foreach (var rootRef in rootRefs)
+                m_rootRefs.Add(new RootReference(rootRef));
+
+            var classInfos = snapshot.Elements("c").Distinct(new ClassInfoComparer());
+            foreach (var classInfo in classInfos)
+                m_classInfos.Add(new ClassInfo(classInfo));
+
+            var moduleInfos = snapshot.Elements("m");
+            foreach (var moduleInfo in moduleInfos)
+                m_moduleInfos.Add(new ModuleInfo(moduleInfo));
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<ObjectInfo> ObjectInfos
+        {
+            get { return m_objectInfos; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<Generation> Generations
+        {
+            get { return m_generations; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<VARange> VirtualAddressRanges
+        {
+            get { return m_va_ranges; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<RootReference> RootReferences
+        {
+            get { return m_rootRefs; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<ClassInfo> ClassInfos
+        {
+            get { return m_classInfos; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public List<ModuleInfo> ModuleInfos
+        {
+            get { return m_moduleInfos; }
+        }
+
+
+        private List<Generation> m_generations = new List<Generation>();
+        private List<ObjectInfo> m_objectInfos = new List<ObjectInfo>();
+        private List<VARange> m_va_ranges = new List<VARange>();
+        private List<RootReference> m_rootRefs = new List<RootReference>();
+        private List<ClassInfo> m_classInfos = new List<ClassInfo>();
+        private List<ModuleInfo> m_moduleInfos = new List<ModuleInfo>();  
+    }
+
+    #endregion // Snapshot
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    //////////////////////////////////////////////////
+    // ----< partial class OrangeCoreExtension >----//
+    //////////////////////////////////////////////////
+
+    public sealed partial class OrangeCoreExtension
+    {
+
+        // @TODO - push this into a helper class
+        public static string GetMemoryStateString(UInt64 memstate)
+        {
+            switch(memstate)
+            {
+                case (UInt64)Win32Wrapper.MemoryState.MEM_COMMIT:   return "committed";
+                case (UInt64)Win32Wrapper.MemoryState.MEM_FREE:     return "free";
+                case (UInt64)Win32Wrapper.MemoryState.MEM_RESERVE:  return "reserved";
+                default:                                            return "unknown";
+            }
+        }
+
+        // @TODO - push this into a helper class
+        public static string GetMemoryTypeString(UInt64 memtype)
+        {
+            switch(memtype)
+            {
+                case (UInt64)Win32Wrapper.MemoryType.MEM_IMAGE:     return "image";
+                case (UInt64)Win32Wrapper.MemoryType.MEM_MAPPED:    return "mapped";
+                case (UInt64)Win32Wrapper.MemoryType.MEM_PRIVATE:   return "private";
+                default:                                            return "unknown";
+            }
+        }
+
+
+        // @TODO - push this into a helper class
+        public static string GetMemoryProtectionString(UInt64 memprot)
+        {
+            if (0 == memprot)
+                return "unknown";
+
+            StringBuilder sb = new  StringBuilder();
+
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_EXECUTE))
+                sb.Append("E ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_EXECUTE_READ))
+                sb.Append("E R ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_EXECUTE_READWRITE))
+                sb.Append("E R W ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_EXECUTE_WRITECOPY))
+                sb.Append("E WC ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_GUARD))
+                sb.Append("G ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_NOACCESS))
+                sb.Append("NA ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_NOCACHE))
+                sb.Append("NC ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_READONLY))
+                sb.Append("RO ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_READWRITE))
+                sb.Append("R W ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_WRITECOMBINE))
+                sb.Append("WCOM ");
+            if (0 != (memprot & (int)Win32Wrapper.MemoryProtection.PAGE_WRITECOPY))
+                sb.Append("WC ");
+
+            return sb.ToString();
+        }
+
+
+        // @TODO - push this into a helper class
+        public static string GetRootTypeString(COR_PRF_GC_ROOT_KIND rootKind, COR_PRF_GC_ROOT_FLAGS rootFlags)
+        {
+            switch (rootKind)
+            {
+                case COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_STACK:
+                    return "stack";
+                case COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_FINALIZER:
+                    return "f-reachable queue";
+                case COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_HANDLE:
+                    {
+                        switch(rootFlags)
+                        {
+                            case COR_PRF_GC_ROOT_FLAGS.COR_PRF_GC_ROOT_PINNING:
+                                return "Handle(pinning)";
+                            case COR_PRF_GC_ROOT_FLAGS.COR_PRF_GC_ROOT_WEAKREF:
+                                return "Handle(weakref)";
+                            case COR_PRF_GC_ROOT_FLAGS.COR_PRF_GC_ROOT_INTERIOR:
+                                return "Handle(interior)";
+                            case COR_PRF_GC_ROOT_FLAGS.COR_PRF_GC_ROOT_REFCOUNTED:
+                            default:
+                                return "unknown";
+                        }
+                    }
+                case COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_OTHER:
+                default:
+                    return "unknown";
+            }
+ 
+        }
+
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        /// <summary>
+        /// The "gcheap" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "gcheap",
+                MinimumAbbrev = 2,
+                ShortHelp = @"Parses the xml report generated by the 'mem' command and displays GC generation ranges.",
+                LongHelp = ""
+            )
+        ]
+        public static void GCHeapCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null != arguments && 0 != arguments.Length)
+                throw new OrangeShellException("This command does not support arguments." + QuickCmdUsageOptions("gcheap"));
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("gcheap"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("gcheap"));
+
+
+            var generations = from item in new Snapshot(traceNavigator.CurrentSnapshot).Generations
+                              select item;
+
+            StringBuilder sb = new StringBuilder();
+            int cHeaps = 0;
+
+            foreach (var generation in generations)
+            {
+                if (3 == generation.Gen) // in case of server gc, each new gen-3 range indicates a new gc-heap.
+                {
+                    sb.AppendFormat("\r\n  HEAP #{0}\r\n", cHeaps++);
+
+                    if (traceNavigator.Header.Is64BitProcess)
+                    {
+                        sb.AppendFormat("  {0,-5}{1,-20}{2,-20}{3}\r\n", "gen", "range-start", "range-length", "range-length (reserved)");
+                        sb.AppendFormat("  {0,-5}{1,-20}{2,-20}{3}\r\n", "===", "===========", "============", "=======================");
+                    }
+                    else
+                    {
+                        sb.AppendFormat("  {0,-5}{1,-13}{2,-14}{3}\r\n", "gen", "range-start", "range-length", "range-length (reserved)");
+                        sb.AppendFormat("  {0,-5}{1,-13}{2,-14}{3}\r\n", "===", "===========", "============", "=======================");
+                    }
+                }
+
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  {0,-5}0x{1,-18:X8}0x{2,-18:X}0x{3:X}\r\n", generation.Gen, generation.RangeStart, generation.RangeLength, generation.RangeLengthReserved);
+                }
+                else
+                {
+                    sb.AppendFormat("  {0,-5}0x{1,-11:X8}0x{2,-12:X}0x{3:X}\r\n", generation.Gen, generation.RangeStart, generation.RangeLength, generation.RangeLengthReserved);
+                }
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        # region vadump command
+
+        /// <summary>
+        /// The "vadump" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "vadump",
+                MinimumAbbrev = 1,
+                ShortHelp = @"Parses the xml report generated by the 'mem' command and displays heap objects.",
+                LongHelp = ""
+            )
+        ]
+        public static void VadumpCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null != arguments && 0 != arguments.Length)
+                throw new OrangeShellException("This command does not support arguments." + QuickCmdUsageOptions("vadump"));
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("vadump"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("vadump"));
+
+            var ranges = from item in new Snapshot(traceNavigator.CurrentSnapshot).VirtualAddressRanges
+                         select item;
+
+            if (0 == ranges.ToList().Count)
+            {
+                throw new OrangeShellException("Virtual address ranges not detected in the trace file.\r\n" +
+                                               "Are you sure you enabled 'mode dump_virtual_address' before profiling?");
+            }
+
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-12}{3,-12}{4}\r\n", "base", "size", "state", "type", "protection");
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-12}{3,-12}{4}\r\n", "====", "====", "=====", "====", "==========");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-12}{3,-12}{4}\r\n", "base", "size", "state", "type", "protection");
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-12}{3,-12}{4}\r\n", "====", "====", "=====", "====", "==========");
+            }
+
+
+            foreach (var range in ranges)
+            {
+                if (traceNavigator.Header.Is64BitProcess)
+                    sb.AppendFormat("  0x{0,-18:X8}0x{1,-18:X}{2,-12}{3,-12}{4}\r\n", 
+                                       range.BaseAddress, range.RegionSize, GetMemoryStateString(range.MemoryState), GetMemoryTypeString(range.MemoryType), GetMemoryProtectionString(range.MemoryProtection));
+                else
+                    sb.AppendFormat("  0x{0,-10:X8}0x{1,-10:X}{2,-12}{3,-12}{4}\r\n",
+                                       range.BaseAddress, range.RegionSize, GetMemoryStateString(range.MemoryState), GetMemoryTypeString(range.MemoryType), GetMemoryProtectionString(range.MemoryProtection));
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        # endregion // vadump command
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        #region objects command
+
+        /// <summary>
+        /// The "objects" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "objects",
+                MinimumAbbrev = 3,
+                ShortHelp = @"Parses the xml report generated by the 'mem' command and displays heap objects.",
+                LongHelp = ""
+            )
+        ]
+        public static void ObjectsCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("objects"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("objects"));
+
+            Snapshot snaphot = new Snapshot(traceNavigator.CurrentSnapshot);
+            var heapObjs = from objInfo in snaphot.ObjectInfos
+                           orderby objInfo.ObjectId
+                           select objInfo;
+ 
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+
+            foreach (var heapObj in heapObjs)
+            {
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  0x{0,-18:X16}0x{1,-18:X16}{2,-5}0x{3:X}\r\n", heapObj.ObjectId, heapObj.ClassId, heapObj.Generation, heapObj.AlignedSize);
+                }
+                else
+                {
+                    sb.AppendFormat("  0x{0,-10:X8}0x{1,-10:X8}{2,-5}0x{3:X}\r\n", heapObj.ObjectId, heapObj.ClassId, heapObj.Generation, heapObj.AlignedSize); 
+                }
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        #endregion // objects command
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        /// <summary>
+        /// The "Classes" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "classes",
+                MinimumAbbrev = 1,
+                ShortHelp = @"Parses the xml report generated by the 'mem' command and displays loaded types/classes.",
+                LongHelp = ""
+            )
+        ]
+        public static void ClassesCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("classes"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("classes"));
+
+            //            if (0 == arguments.Length)
+            //                throw new OrangeShellException("Did you pass in location of the xml report file?" + tagCallbackStatsHelp);
+
+            Snapshot snaphot = new Snapshot(traceNavigator.CurrentSnapshot);
+            var classes = from classinfo in snaphot.ClassInfos
+                          select classinfo;
+
+
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-7}{2,-20}\r\n", "MT", "Count", "Name");
+                sb.AppendFormat("  {0,-20}{1,-7}{2,-20}\r\n", "==", "=====", "====");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-7}{2,-12}\r\n", "MT", "Count", "Name");
+                sb.AppendFormat("  {0,-12}{1,-7}{2,-12}\r\n", "==", "=====", "====");
+            }
+
+            foreach (var c in classes)
+            {
+                var totalInstances = (from objInfo in snaphot.ObjectInfos
+                                      where objInfo.ClassId == c.Id
+                                      select objInfo).Count();
+
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  0x{0,-18:X16}{1,-7}{2}\r\n", c.Id, totalInstances, c.ClassName);
+                }
+                else
+                {
+                    sb.AppendFormat("  0x{0,-10:X8}{1,-7}{2}\r\n", c.Id, totalInstances, c.ClassName);
+                }
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        /// <summary>
+        /// The "Classes" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "modules",
+                MinimumAbbrev = 1,
+                ShortHelp = @"Parses the xml report generated by the 'mem' command and displays loaded modules.",
+                LongHelp = ""
+            )
+        ]
+        public static void ModulesCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("modules"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("modules"));
+
+            //            if (0 == arguments.Length)
+            //                throw new OrangeShellException("Did you pass in location of the xml report file?" + tagCallbackStatsHelp);
+
+            Snapshot snaphot = new Snapshot(traceNavigator.CurrentSnapshot);
+            var moduleInfos = from moduleInfo in snaphot.ModuleInfos
+                                     orderby moduleInfo.ModuleId
+                                     select moduleInfo;
+
+
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-20}{2}\r\n", "Module", "Assemby", "Module Name");
+                sb.AppendFormat("  {0,-20}{1,-20}{2}\r\n", "======", "=======", "===========");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-12}{2}\r\n", "Module", "Assembly", "Module Name");
+                sb.AppendFormat("  {0,-12}{1,-12}{2}\r\n", "======", "========", "===========");
+            }
+
+            foreach (var m in moduleInfos)
+            {
+
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  0x{0,-18:X16}0x{1,-18:X16}{2}\r\n", m.ModuleId, m.AssemblyId, m.ModuleName);
+                }
+                else
+                {
+                    sb.AppendFormat("  0x{0,-10:X8}0x{1,-10:X8}{2}\r\n", m.ModuleId, m.AssemblyId, m.ModuleName);
+                }
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        ///////////////////////////////////////////////////////////////////////////
+
+
+        /// <summary>
+        /// The "PinnedObjects" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "pinnedobjects",
+                MinimumAbbrev = 3,
+                ShortHelp = @"Displays all pinned objects on the heap for current snapshot.",
+                LongHelp = ""
+            )
+        ]
+        public static void PinnedObjects(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("pinnedobjects"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("pinnedObjects"));
+
+            //            if (0 == arguments.Length)
+            //                throw new OrangeShellException("Did you pass in location of the xml report file?" + tagCallbackStatsHelp);
+
+            Snapshot snapshot = new Snapshot(traceNavigator.CurrentSnapshot);
+            var pinnedObjs = from objInfo in snapshot.ObjectInfos
+                             from rootref in snapshot.RootReferences
+                             where (objInfo.ObjectId == rootref.ReferencedObjectId
+                                       && rootref.RootKind == (UInt64)COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_HANDLE
+                                       && rootref.RootFlag == (UInt64)COR_PRF_GC_ROOT_FLAGS.COR_PRF_GC_ROOT_PINNING)
+                             orderby objInfo.ObjectId
+                             select objInfo; 
+
+            if (0 == pinnedObjs.Count())
+            {
+                Orange.Shell.WriteLine(OutputType.LOG, "No pinned objects were detected in this snapshot.");
+                return;
+            }
+                             
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+
+            foreach (var obj in pinnedObjs)
+            {
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  0x{0,-18:X16}0x{1,-18:X16}{2,-5}0x{3:X}\r\n", obj.ObjectId, obj.ClassId, obj.Generation, obj.AlignedSize);
+                }
+                else
+                {
+                    sb.AppendFormat("  0x{0,-10:X8}0x{1,-10:X8}{2,-5}0x{3:X}\r\n", obj.ObjectId, obj.ClassId, obj.Generation, obj.AlignedSize);
+                }
+
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        /// <summary>
+        /// The "FinalizedObjects" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "finalizedobjects",
+                MinimumAbbrev = 3,
+                ShortHelp = @"Displays all pinned objects on the heap for current snapshot.",
+                LongHelp = ""
+            )
+        ]
+        public static void FinalizedObjects(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("finalizedobjects"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("finalizedObjects"));
+
+            //            if (0 == arguments.Length)
+            //                throw new OrangeShellException("Did you pass in location of the xml report file?" + tagCallbackStatsHelp);
+
+            Snapshot snaphot = new Snapshot(traceNavigator.CurrentSnapshot);
+            var finalizedObjs = from objInfo in snaphot.ObjectInfos
+                                from rootref in snaphot.RootReferences
+                                where (objInfo.ObjectId == rootref.ReferencedObjectId
+                                    && rootref.RootKind == (UInt64)COR_PRF_GC_ROOT_KIND.COR_PRF_GC_ROOT_FINALIZER)
+                                orderby objInfo.ObjectId
+                                select objInfo;
+
+            if (0 == finalizedObjs.ToList().Count)
+            {
+                Orange.Shell.WriteLine(OutputType.LOG, "No finalized objects were detected in this snapshot.");
+                return;
+            }
+
+            StringBuilder sb = new StringBuilder();
+
+            if (traceNavigator.Header.Is64BitProcess)
+            {
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-20}{1,-20}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+            else
+            {
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "address", "MT", "gen", "size");
+                sb.AppendFormat("  {0,-12}{1,-12}{2,-5}{3}\r\n", "=======", "==", "===", "====");
+            }
+
+            foreach (var obj in finalizedObjs)
+            {
+                if (traceNavigator.Header.Is64BitProcess)
+                {
+                    sb.AppendFormat("  0x{0,-18:X16}0x{1,-18:X16}{2,-5}0x{3:X}\r\n", obj.ObjectId, obj.ClassId, obj.Generation, obj.AlignedSize);
+                }
+                else
+                {
+                    sb.AppendFormat("  0x{0,-10:X8}0x{1,-10:X8}{2,-5}0x{3:X}\r\n", obj.ObjectId, obj.ClassId, obj.Generation, obj.AlignedSize);
+                }
+            }
+
+            Orange.Shell.WriteLine(OutputType.LOG, sb.ToString());
+        }
+
+        ///////////////////////////////////////////////////////////////////////////
+
+        # region roots command
+
+        /// <summary>
+        /// The "Roots" command.
+        /// </summary>
+        /// <param name="arguments"></param>
+        [
+            CommandDescription(
+                CommandName = "roots",
+                MinimumAbbrev = 3,
+                ShortHelp = @"Tracks and displays object heirarchy all the way to the roots.",
+                LongHelp = ""
+            )
+        ]
+        public static void RootsCmd(string arguments)
+        {
+            // pre-condition checks
+            if (null == arguments)
+                throw new ArgumentNullException("arguments");
+            if (0 == arguments.Length)
+                throw new OrangeShellException("Did you pass in the object address to lookup?" + QuickCmdUsageOptions("Roots"));
+            if (string.IsNullOrEmpty(traceNavigator.TraceFile))
+                throw new OrangeShellException("To use this command, a trace file has to be loaded first." + QuickCmdUsageOptions("finalizedobjects"));
+            if (traceNavigator.CurrentSnapshotIndex < 0)
+                throw new OrangeShellException("This command can only by used on snapshots. Please use next, prev or goto commands." + QuickCmdUsageOptions("finalizedObjects"));
+
+
+            // @TODO - refactor the code that parses arguments.
+            bool asHex = false;
+            UInt64 objectId = 0;
+            if (arguments.StartsWith("0x", StringComparison.InvariantCultureIgnoreCase))
+            {
+                arguments = arguments.Substring(2);
+                asHex = true;
+            }
+
+            if (false == UInt64.TryParse(arguments,
+                                         (asHex)
+                                         ? System.Globalization.NumberStyles.HexNumber
+                                         : System.Globalization.NumberStyles.Integer,
+                                         System.Globalization.CultureInfo.InvariantCulture,
+                                         out objectId))
+            {
+                throw new OrangeShellException("The object address is in an invalid format." + QuickCmdUsageOptions("Roots"));
+            }
+
+
+            Dictionary<UInt64, bool> heapObjLookupTable = new Dictionary<UInt64, bool>();
+            Snapshot snapshot = new Snapshot(traceNavigator.CurrentSnapshot);
+            List<ObjectInfo> cachedObjectList = snapshot.ObjectInfos;
+            List<RootReference> cachedRootReferenceList = snapshot.RootReferences;
+            List<ClassInfo> cachedClassInfoList = snapshot.ClassInfos;
+
+            foreach (var heapObj in cachedObjectList)
+                heapObjLookupTable[heapObj.ObjectId] = false;
+
+            var heapObjQuery = from obj in cachedObjectList
+                               where (obj.ObjectId == objectId)
+                               select obj;
+
+            if (0 == heapObjQuery.ToList().Count)
+            {
+                throw new OrangeShellException("Could not locate object with address =" + arguments + "\r\n" +
+                                               "Are you sure you have passed in the correct address?");
+            }
+
+            else if (heapObjQuery.ToList().Count > 1)
+            {
+                throw new OrangeShellException("Multiple objects with id =" + arguments + " were detected.\r\n" +
+                                               "Please contact the developer for support");
+            }
+
+            ScanForRoots(heapObjQuery.ElementAt(0), 0, ref heapObjLookupTable, ref cachedObjectList, ref cachedRootReferenceList, ref cachedClassInfoList);
+        }
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="heapObj"></param>
+        /// <param name="indentLevel"></param>
+        /// <param name="heapObjLookupTable"></param>
+        /// <param name="cachedObjectList"></param>
+        /// <param name="cachedRootReferenceList"></param>
+        private static void ScanForRoots(
+            ObjectInfo heapObj,
+            int indentLevel,
+            ref Dictionary<UInt64, bool> heapObjLookupTable,
+            ref List<ObjectInfo> cachedObjectList,
+            ref List<RootReference> cachedRootReferenceList,
+            ref List<ClassInfo> cachedClassInfoList)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < indentLevel; i++)
+                sb.Append("  ");
+            sb.AppendFormat("0x{0:x}  {1}\r\n", heapObj.ObjectId, FindClassInfo(heapObj, ref cachedClassInfoList).ClassName);
+
+            // Mark the object as "visited" in the lookup table.
+            heapObjLookupTable[heapObj.ObjectId] = true;
+            Orange.Shell.Write(OutputType.LOG, sb.ToString());
+
+            sb = new StringBuilder(); // @todo - replace with sb.Clear() later.
+            var roots = FindRoots(heapObj, ref cachedRootReferenceList);
+            foreach (var root in roots)
+            {
+                for (int i = 0; i < indentLevel + 1; i++)
+                    sb.Append("  ");
+                sb.AppendFormat("[ROOT:{0}] 0x{1:x}\r\n", GetRootTypeString((COR_PRF_GC_ROOT_KIND)root.RootKind, (COR_PRF_GC_ROOT_FLAGS)root.RootFlag), root.RootId);
+            }
+            Orange.Shell.Write(OutputType.LOG, sb.ToString(), 0, sb.ToString().Length); // highlight the roots.
+
+            var parents = FindParentObjects(heapObj, ref cachedObjectList/*, ref cachedObjRefList*/);
+            foreach (var parent in parents)
+                if (false == heapObjLookupTable[parent.ObjectId]) // if object has not been visited previously
+                    ScanForRoots(parent, indentLevel + 1, ref heapObjLookupTable, ref cachedObjectList/*, ref cachedObjRefList*/, ref cachedRootReferenceList, ref cachedClassInfoList);
+        }
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="heapObj"></param>
+        /// <param name="cachedObjectList"></param>
+        /// <returns></returns>
+        private static IEnumerable<ObjectInfo> FindParentObjects(ObjectInfo heapObj, ref List<ObjectInfo> cachedObjectList /*, ref List<ObjectReference> cachedObjRefList*/)
+        {
+            return (from obj in cachedObjectList
+                    from refObj in obj.ReferencedObjects
+                    where (refObj == heapObj.ObjectId)
+                    select obj);            
+
+            //var objRefQuery = from objRef in cachedObjRefList
+            //                  from objId in objRef.ReferencedObjects
+            //                  where (objId == heapObj.Id)
+            //                  select objRef;
+
+            //return (from obj in cachedObjectList
+            //        from refObj in objRefQuery
+            //        where (refObj.ObjectId == obj.Id)
+            //        select obj);
+        }
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="heapObj"></param>
+        /// <param name="cachedRootReferenceList"></param>
+        /// <returns></returns>
+        private static IEnumerable<RootReference> FindRoots(ObjectInfo heapObj, ref List<RootReference> cachedRootReferenceList)
+        {
+            return (from rootRef in cachedRootReferenceList
+                    where (rootRef.ReferencedObjectId == heapObj.ObjectId)
+                    select rootRef);
+        }
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="heapObj"></param>
+        /// <param name="cachedClassInfoList"></param>
+        /// <returns></returns>
+        private static ClassInfo FindClassInfo(ObjectInfo heapObj, ref List<ClassInfo> cachedClassInfoList)
+        {
+            var classinfoQuery = from classinfo in cachedClassInfoList
+                                 where (classinfo.Id == heapObj.ClassId)
+                                 select classinfo;
+
+            if (1 != classinfoQuery.ToList().Count)
+            {
+                throw new OrangeShellException("Could not locate class information for with address = " + heapObj.ObjectId + "\r\n" +
+                                               "Please contact the developer for support");
+            }
+
+            return classinfoQuery.ElementAt(0);
+        }
+
+        # endregion // roots command
+
+
+        ///////////////////////////////////////////////////////////////////////////
+
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+
+}

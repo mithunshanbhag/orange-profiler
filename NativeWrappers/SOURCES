@@ -1,0 +1,18 @@
+#
+# build instructions for this directory
+#
+!include $(NTMAKEENV)\sources.man
+!include ..\..\..\sources.cmn
+
+
+CATEGORIES_DEFAULT      =DAILY
+UMTYPE_DEFAULT          =CONSOLE
+TARGETCOMPILER_DEFAULT  =CP_CSC
+COMPILEFLAGS_DEFAULT    =$(PROF_CSC_FLAGS)
+TARGETPATH_DEFAULT      =$(PROF_BIN)
+
+SYNCHRONIZE_BLOCK       =1
+
+TARGETNAME10    =NativeWrappers
+TARGETTYPE10    =DYNLINK
+SOURCES10       =*.cs			        \

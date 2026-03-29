@@ -1,0 +1,23 @@
+#
+# build instructions for this directory
+#
+!include $(NTMAKEENV)\sources.man
+!include ..\..\..\sources.cmn
+
+
+CATEGORIES_DEFAULT      =DAILY
+UMTYPE_DEFAULT          =CONSOLE
+TARGETCOMPILER_DEFAULT  =CP_CSC
+
+SYNCHRONIZE_BLOCK       =1
+
+TARGETNAME10    =Orange
+TARGETTYPE10    =PROGRAM
+TARGETPATH10    =$(PROF_BIN)
+COMPILEFLAGS10  =$(PROF_CSC_FLAGS)
+SOURCES10       =*.cs       			\
+
+TARGETNAME20     = CopyConfig
+TARGETTYPE20     = CMD
+TARGETCOMMAND20  = CP_COPY
+COMMANDLINE20    = /Y orange.exe.config $(PROF_BIN)\

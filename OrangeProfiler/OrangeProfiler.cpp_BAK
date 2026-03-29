@@ -1,0 +1,2677 @@
+#pragma once
+////////////////////////////////////////////////////////////////////////////
+// OrangeProfiler.cpp - Implementation of the orange profiler.            //
+// Application        - Orange Profiler.                                  //
+// Author             - Mithun Shanbhag, mithuns@microsoft.com            //
+////////////////////////////////////////////////////////////////////////////
+
+
+#include "common.hxx"
+#include "OrangeProfiler.h"
+
+
+// Set the global configurations
+DWORD g_DiagnosticInfoLevel = TRACELEVEL_ERROR;     
+FILE * g_pLog = NULL;
+
+
+
+unsigned __stdcall ForceGCThreadStub(void * p)
+{    
+    OrangeProfiler * pOp = (OrangeProfiler *) p;
+    pOp->ThreadStubWrapper();
+    return 0;
+}
+
+
+
+OrangeProfiler::OrangeProfiler() 
+: m_bIsWOW64Process           (FALSE),
+  m_hProc                     (NULL),
+  m_dwPid                     (0),
+  m_cRef                      (1),
+  m_dwWorkerThreadId          (0),
+  m_hndWorkerThread           (NULL),
+  m_bWorkerThreadExit         (FALSE),
+  m_pStats                    (NULL),
+  m_pInfo                     (NULL),
+  m_wszCustomSnapshotAction   (NULL),
+  m_cGCRefCnt                 (0),
+  m_dwOptions                 (DUMP_GENRANGES | DUMP_HEAP), // change this later. 
+  m_bAttachingProfiler		  (FALSE)
+{
+    // system specific variables get initialized first
+    ZeroMemory(& m_sysInfo, sizeof(m_sysInfo));
+
+    // and then the process specific ones
+    ZeroMemory(m_wszFilePath, 2 * MAX_PATH * sizeof(WCHAR));
+    ZeroMemory(m_wszFileName, 2 * MAX_PATH * sizeof(WCHAR));
+
+    // and then the profiler specific ones
+    InitializeCriticalSection(& m_cs);
+
+    // and finally the profiling session specific ones
+    m_mapHeapObjects.clear();
+	m_classIdLookup.clear();
+	m_objectIdLookup.clear();
+
+    RetrieveSystemAndProcessInfo();
+}
+
+
+OrangeProfiler::~OrangeProfiler() 
+{
+    // first clear the profiling session specific variables
+    m_mapHeapObjects.clear();
+	m_classIdLookup.clear();
+	m_objectIdLookup.clear();
+
+    
+    if (NULL != m_pStats) {
+        delete m_pStats;
+        m_pStats = NULL;
+    }
+
+    if (0 != m_dwOptions) {
+        m_dwOptions = 0;
+    }
+    
+    if (NULL != m_wszCustomSnapshotAction) {
+        m_wszCustomSnapshotAction = NULL;
+    }
+    
+
+    // then the profiler specific ones
+    DeleteCriticalSection(& m_cs);    
+
+    // then the runtime specific ones
+    if (NULL != m_pInfo) {
+        m_pInfo->Release();
+        m_pInfo = NULL;
+    }
+
+    // clear out all the process specific ones
+    ZeroMemory(m_wszFilePath, 2 * MAX_PATH * sizeof(WCHAR));
+    ZeroMemory(m_wszFileName, 2 * MAX_PATH * sizeof(WCHAR));
+
+    if (NULL != m_dwPid) {
+        m_dwPid = NULL;
+    }
+
+    if (NULL != m_hProc) {
+        CloseHandle(m_hProc);
+        m_hProc = NULL;
+    }
+    
+    // and finally the system ones
+    ZeroMemory(& m_sysInfo, sizeof(m_sysInfo));
+    
+    //////////////////////////////////
+
+	if (NULL != g_pLog) {
+        fclose(g_pLog);
+        g_pLog = NULL;
+    }
+
+}
+
+
+// This is ultimately derived from IUnknown. So....
+
+HRESULT __stdcall OrangeProfiler::QueryInterface(const IID & iid, void** ppv)
+{
+    if (iid == IID_IUnknown) {
+        * ppv = static_cast<ICorProfilerCallback*>(this); // original implementation
+    }
+    else if (iid == IID_ICorProfilerCallback) {
+        * ppv = static_cast<ICorProfilerCallback*>(this);
+    }
+    else if (iid == IID_ICorProfilerCallback2) {
+        * ppv = static_cast<ICorProfilerCallback2*>(this);
+    }
+    else if (iid == IID_ICorProfilerCallback3) {
+        * ppv = static_cast<ICorProfilerCallback3*>(this);
+    }
+    else {
+        * ppv = NULL;
+        return E_NOINTERFACE;
+    }
+    reinterpret_cast<IUnknown*>(*ppv)->AddRef();
+    return S_OK;
+}
+
+
+ULONG __stdcall OrangeProfiler::AddRef()
+{
+    return InterlockedIncrement(& m_cRef);
+}
+
+
+ULONG __stdcall OrangeProfiler::Release()
+{
+    if (0 == InterlockedDecrement(& m_cRef)) {
+        delete this;
+        return 0;
+    }
+    return m_cRef;
+}
+
+
+//*********************************************************************
+//  Descripton: Retrieves the process's handle, ID, name and full-path.
+//              Also captures system specific information (in a 
+//              SYSTEM_INFO structure).
+//  
+//  Params:     n/a.
+//
+//  Return:     S_OK if method successful, else appropriate error code.
+//  
+//  Notes:      This method uses the TRACE, TRACEERROR macros to log any 
+//              errors. Please ensure that this method is called only
+//              after the underlying log-stream has been initialized.
+//*********************************************************************
+
+HRESULT OrangeProfiler::RetrieveSystemAndProcessInfo()
+{
+    HRESULT hr = S_OK;
+    
+    if (NULL == (m_hProc = GetCurrentProcess())) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        TRACEERROR(hr, L"Failed to get currrent process's handle.");
+        goto ErrReturn;
+    }
+
+    if (0 == (m_dwPid = GetCurrentProcessId())) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        TRACEERROR(HRESULT_FROM_WIN32(GetLastError()), L"Failed to get currrent process's ID.");
+        goto ErrReturn;
+    }
+
+    if (0 == GetModuleFileName(NULL, m_wszFilePath, 2 * MAX_PATH)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        TRACEERROR(hr, L"Call to Kernel32!GetModuleFileName failed.");
+        goto ErrReturn;
+    }
+
+    if (0 == GetModuleBaseName(m_hProc, NULL, m_wszFileName, 2 * MAX_PATH)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        TRACEERROR(hr, L"Call to Psapi!GetModuleBaseName failed.");
+        goto ErrReturn;
+    }
+
+	if (NULL != m_hProc) 
+        IsWow64Process(m_hProc, & m_bIsWOW64Process); 
+
+    // The MSDN documentation says that if we are running in WOW64, then we must
+    // call GetNativeSystemInfo() instead of GetSystemInfo() to retrieve the 
+    // highest address accessible to the app. 
+    // However I've observed this - 
+    // If I call GetNativeSystemInfo() on WOW64, the m_sysInfo.lpMaximumApplicationAddress is 0xFFFEFFFF (which is bogus).
+    // While if I call GetSystemInfo() on WOW64, the m_sysInfo.lpMaximumApplicationAddress is 0x7FFEFFFF (which looks correct).
+    // Temporarily commenting out the code below until I can figure this one out - 
+    /*  
+    if (TRUE == bIsWOW64Process) 
+        GetNativeSystemInfo(& m_sysInfo);
+    else */ 
+        GetSystemInfo(& m_sysInfo);
+
+    if (NULL == m_sysInfo.lpMaximumApplicationAddress) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"m_sysInfo.lpMaximumApplicationAddress is NULL");
+        goto ErrReturn;
+    }
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    return hr;
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      n/a
+//*********************************************************************
+
+HRESULT OrangeProfiler::DisplayGCGenerationRanges()
+{
+    HRESULT hr = S_OK;
+    ULONG cObjectRanges = 0;
+    COR_PRF_GC_GENERATION_RANGE * pGcGenRanges = NULL; 
+
+    // let us get the required size of caller-allocated buffer by
+    // passing in a zero-length buffer first.
+    hr = m_pInfo->GetGenerationBounds(0, & cObjectRanges, NULL);
+    HR_CHECK(hr, S_OK, L"ICorProfilerInfo2::GetGenerationBounds");
+
+    if (0 == cObjectRanges) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Unexpected error -> ICorProfilerInfo2::GetGenerationBounds returned zero object ranges");
+        goto ErrReturn;
+    }
+
+    // allocate memory for the buffer
+    pGcGenRanges = new COR_PRF_GC_GENERATION_RANGE[cObjectRanges];
+    if (NULL == pGcGenRanges) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Failed to allocate memory");
+        goto ErrReturn;
+    }
+
+    // now let us get the GC generation bounds now
+    hr = m_pInfo->GetGenerationBounds(cObjectRanges, & cObjectRanges, pGcGenRanges);
+    HR_CHECK(hr, S_OK, L"ICorProfilerInfo2::GetGenerationBounds");
+
+    for (int i = 0; i < cObjectRanges; i++)
+    {
+        TRACE(L"<gen g=\"0x%X\" rs=\"0x%X\" rl=\"0x%X\" rlr=\"0x%X\"/>", 
+            pGcGenRanges[i].generation,
+            pGcGenRanges[i].rangeStart,
+            pGcGenRanges[i].rangeLength,
+            pGcGenRanges[i].rangeLengthReserved);
+    }
+
+    /////////////////////////////////////////////////////
+
+ErrReturn:
+    return hr;
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      n/a
+//*********************************************************************
+
+HRESULT OrangeProfiler::DumpModules()
+{
+    TRACE(L"<DUMPMODULES>");
+    /////////////////////////////////////////////////////
+
+    HRESULT hr = S_OK;
+    ULONG cModules = 0;
+    ULONG cModulesFetched = 0;
+    WCHAR wszModuleName[MAX_PATH] = {0};
+    ULONG cchModuleName = 0;
+
+
+
+    ICorProfilerModuleEnum * pModuleEnum = NULL;
+    ModuleID * pModuleIds = NULL;
+
+    hr = m_pInfo->EnumModules(& pModuleEnum);
+    HR_CHECK(hr, S_OK, L"ICorProfilerInfo3::EnumModules");
+
+    hr = pModuleEnum->GetCount(& cModules);
+    HR_CHECK(hr, S_OK, L"ICorProfilerModuleEnum::GetCount");
+
+    pModuleIds = new ModuleID[cModules];
+    if (NULL == pModuleIds) {
+        hr = E_OUTOFMEMORY;
+        TRACEERROR(hr, L"Failed to allocate memory");
+        goto ErrReturn;
+    }
+    
+    hr = pModuleEnum->Next(cModules, pModuleIds, & cModulesFetched);
+    HR_CHECK(hr, S_OK, L"ICorProfilerModuleEnum::Next");
+
+    if (cModulesFetched != cModules) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"cModulesFetched != cModules");
+        goto ErrReturn;
+    }
+    
+    // For each module in the enumeration .......
+    for (int idx = 0; idx < cModulesFetched; idx++)
+    {
+        hr = m_pInfo->GetModuleInfo(pModuleIds[idx], NULL, MAX_PATH, & cchModuleName, wszModuleName, NULL);
+        HR_CHECK(hr, S_OK, L"ICorProfilerInfo::GetModuleInfo");
+        
+        TRACE(L"<module id=\"0x%X\", name=\"%s\"/>", pModuleIds[idx], wszModuleName);
+    }
+    
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    TRACE(L"</DUMPMODULES>");
+    return hr;
+
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      n/a
+//*********************************************************************
+
+HRESULT OrangeProfiler::CustomSnapshotAction()
+{
+    TRACE(L"<customaction>");
+   /////////////////////////////////////////////////////
+
+    HRESULT hr = S_OK;
+    DWORD dwRet = 0;
+    DWORD dwExitCode = 0;
+    STARTUPINFO si = {0};
+    PROCESS_INFORMATION pi = {0};
+
+    si.cb = sizeof(si);
+    
+    DIAGNOSTIC(L"Starting custom action: %s", m_wszCustomSnapshotAction);
+
+    dwRet = CreateProcess(
+                NULL,
+                m_wszCustomSnapshotAction, // Command line. 
+                NULL,				// Process handle not inheritable. 
+                NULL,				// Thread handle not inheritable. 
+                FALSE,			// Set handle inheritance to FALSE. 
+                0,					// No creation flags. 
+                NULL,				// Use parent's environment block. 
+                NULL,				// Use parent's starting directory. 
+                &si,				// Pointer to STARTUPINFO structure.
+                &pi );			// Pointer to PROCESS_INFORMATION structure.
+    
+    if (0 == dwRet) 
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+    }
+    HR_CHECK(hr, S_OK, L"Kernel32::CreateProcess");
+
+    // Wait till 30 secs for child process to exit    
+    dwRet = WaitForSingleObject(pi.hProcess, 30000);
+
+    if (WAIT_TIMEOUT == dwRet)  
+    {
+        DIAGNOSTIC(L"Custom action taking longer than 30 secs. Proceedig without waiting........");
+    }
+    
+    else if (WAIT_OBJECT_0 == dwRet) 
+    {
+        dwRet = GetExitCodeProcess(pi.hProcess, & dwExitCode);
+        if (0 == dwRet) 
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+        }
+        HR_CHECK(hr, S_OK, L"Kernel32::GetExitCodeProcess");    
+        DIAGNOSTIC(L"Custom action finished with exit code: %d", dwExitCode);
+        TRACE(L"</exitcode>0x%x</exitcode>", dwExitCode);
+    }
+
+    else 
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        TRACEERROR(hr, L"Kernel32!WaitForSingleObject");
+        goto ErrReturn;
+    }
+ 
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    // Dispose process and thread handles
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    
+    TRACE(L"</customaction>");
+    return hr;
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:     n/a
+//*********************************************************************
+
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      @TODO - We are trying to dump our SOS!DumpHeap style
+//              here. However what we should really be doing is to
+//              simply dump the bare-minimum to XML and re-create the
+//              SOS!DumpHeap style output in post-processing step (by
+//              parsing the XML via LINQ).
+//*********************************************************************
+
+HRESULT OrangeProfiler::DumpHeap()
+{
+    TRACE(L"<DUMPHEAP>");
+    /////////////////////////////////////////////////////
+
+    HRESULT hr = S_OK;
+    ObjectID objectid = NULL;
+    ULONG rangelen = 0;
+
+    // some pre-condition checks
+    if (NULL == m_pInfo) {
+        hr = E_INVALIDARG;
+        TRACEERROR(hr, L"pre-condition check failed -> m_pInfo");
+        goto ErrReturn;
+    }
+
+
+    TRACE(L"%8s %8s %8s", L"Address", L"MT", L"Size" ); 
+
+
+    m_mapHeapObjectsItr = m_mapHeapObjects.begin();
+    while(m_mapHeapObjectsItr != m_mapHeapObjects.end())
+    {
+        objectid = m_mapHeapObjectsItr->first;
+        
+        while (objectid < m_mapHeapObjectsItr->first /*range start*/ + m_mapHeapObjectsItr->second /*range length*/)
+        {
+            ObjectInfo oi(objectid, m_pInfo);
+            hr = oi.Init();
+            HR_CHECK(hr, S_OK, L"ObjectInfo::Init");
+        
+            TRACE(L"%08x %08x %8d", objectid, oi.m_ClassId, oi.m_cbObjAlignedSize); 
+
+            ClassInfo ci(oi.m_ClassId, m_pInfo);
+            hr = ci.Init();
+            HR_CHECK(hr, S_OK, L"ClassInfo::Init");
+
+            if (0 != ci.m_cFields) {
+                TRACE(L"%8s %8s %8s %20s %2s %8s %8s %s", L"MT", L"Field", L"Offset", L"Type", L"VT", L"Attr", L"Value", L"Name");
+            }
+
+            for (int i = 0; i < ci.m_cFields; i++)
+            {
+                LPWSTR wszAttr = NULL;
+                
+                if (IsFdStatic(ci.m_pFields[i].m_dwFieldAttr))
+                    wszAttr = L"shared";
+                else if (IsFdLiteral(ci.m_pFields[i].m_dwFieldAttr)) 
+                    wszAttr = L"literal";
+                else
+                    wszAttr = L"instance";  
+
+
+                
+
+                //ClassInfo ci2(ci.m_pFields[i].m_ClassId, m_pInfo);
+                //hr = ci2.Init();
+                //HR_CHECK(hr, S_OK, L"ClassInfo::Init");
+                    
+
+                TRACE(L"%08x %8x %8x %20s %2s %8s %8s %s", 
+                      ci.m_pFields[i].m_ClassId,
+                      ci.m_pFields[i].m_fieldDefTok,
+                      ci.m_pFields[i].m_ulFieldOffset,
+                      /*ci.m_pFields[i].m_wszTypeDefName*/ L"?",
+                      (ELEMENT_TYPE_VALUETYPE == ci.m_pFields[i].m_dwCPlusTypeFlag) ? L"1" : L"0",
+                      wszAttr,
+                      L"?",
+                      ci.m_pFields[i].m_pwszFieldName);
+            }
+                      
+            // skip to next object
+            objectid += oi.m_cbObjAlignedSize;
+        }
+        
+        ++m_mapHeapObjectsItr;
+        
+        if (m_mapHeapObjectsItr != m_mapHeapObjects.end()) {
+
+            // Are there any free objects around?
+            if (objectid < m_mapHeapObjectsItr->first) {
+            
+                // HACK ALERT: [MithunS]: I initially considered wrapping the free object in a ObjectInfo instance.
+                // However it turns out that when we call Init() on it, there is an AV. Turns out that we cannot
+                // call ICorProfilerInfo::GetClassFromObject on a free object. I opened bug Dev10: 635574 
+                // on this. However this is really a corner case and has been "won't fixed". Hence the only way
+                // for me to get the free object's classId/MethodTable is to reverse engineer. Every objectID 
+                // is a pointer to a object on the heap. The first four bytes of the heap object is the Methodtable. 
+                ULONG ulAlignedSize = 0;
+                hr = ObjectInfo::GetAlignedSize(m_pInfo, objectid, & ulAlignedSize); 
+                HR_CHECK(hr, S_OK, L"ObjectInfo::GetAlignedSize");                                
+                
+                TRACE(L"%08x %08x %8d Free", objectid, (*(ULONG *) objectid), ulAlignedSize); 
+            }
+        }
+    }
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    TRACE(L"</DUMPHEAP>");
+    return hr;
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      n/a
+//*********************************************************************
+
+HRESULT OrangeProfiler::DisplayVirtualAddressSpace()
+{
+    HRESULT hr = S_OK;
+    LPCVOID lpAddress = (LPCVOID)0;
+    MEMORY_BASIC_INFORMATION buffer = {0};
+
+    // pre-condition checks
+    if (NULL == m_hProc) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Failed a precondition check -> m_hProc is NULL");
+        goto ErrReturn;
+    }
+    if (NULL == m_sysInfo.lpMaximumApplicationAddress) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Failed a precondition check -> m_sysInfo.lpMaximumApplicationAddress is NULL");
+        goto ErrReturn;
+    }
+
+    DIAGNOSTIC(L"max addr=0x%X", m_sysInfo.lpMaximumApplicationAddress);
+
+    while (lpAddress < m_sysInfo.lpMaximumApplicationAddress)
+    {
+        if (0 == VirtualQueryEx(GetCurrentProcess(), lpAddress, & buffer, sizeof(MEMORY_BASIC_INFORMATION)))   {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            TRACEERROR(hr, L"Kernel32!VirtualQuery() failed.");
+            goto ErrReturn;
+        }
+
+        TRACE(L"<va b=\"%x\" r=\"%x\" s=\"%x\" p=\"%x\" t=\"%x\"/>",
+              buffer.BaseAddress, 
+              buffer.RegionSize, 
+              buffer.State,
+			  buffer.Protect,
+			  buffer.Type);
+
+        //  increment pointer by current region size 
+        lpAddress = (LPCVOID) ((ULONG)lpAddress + (ULONG) buffer.RegionSize);
+        
+        ZeroMemory(& buffer, sizeof(MEMORY_BASIC_INFORMATION));
+
+    }
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    return hr;
+}
+
+
+//*********************************************************************
+//  Descripton: <@TODO>
+//  
+//  Params:     <@TODO>
+//
+//  Return:     n/a
+//  
+//  Notes:      n/a
+//*********************************************************************
+
+void OrangeProfiler::ThreadStubWrapper()
+{
+    HRESULT hr = S_OK;
+    DWORD dwRet = 0;
+
+    // Looping and waiting for suspension event to be signalled
+    while (S_OK == hr && FALSE == m_bWorkerThreadExit) {
+
+        dwRet = WaitForMultipleObjects(SENTINEL_HANDLE, m_hndWaitEvents, FALSE, INFINITE);
+    
+        if (WAIT_FAILED == dwRet) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            continue;
+        }
+
+        else if (WAIT_TIMEOUT == dwRet) {
+            hr =  HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            continue;
+        }
+
+        else if (WAIT_OBJECT_0 <= dwRet && WAIT_OBJECT_0 + SENTINEL_HANDLE > dwRet) { // we have been signaled
+
+            WaitEventHandles type = (WaitEventHandles) (dwRet - WAIT_OBJECT_0);
+
+            // is the thread supposed to exit now?
+            if (TRUE == m_bWorkerThreadExit) {
+                continue;
+            }
+
+            // some necessary pre-condition check
+            if (NULL == m_pInfo) {
+                hr = E_FAIL;
+                continue;
+            }
+            
+            if (type == FORCEGC_EVENT_HANDLE) {
+                // Now that we have been signaled to force a GC event ....
+                DIAGNOSTIC(L"Calling ICorProfilerInfo::ForceGC()....");
+                hr = m_pInfo->ForceGC(); 
+                if (S_OK != hr) {
+                    TRACEERROR(hr, L"ICorProfilerInfo::ForceGC");
+                    continue;
+                }
+            }
+
+            if (type == DETACH_EVENT_HANDLE) {
+                // Now that we have been signaled to detach the profiler ....
+                DIAGNOSTIC(L"Calling ICorProfilerInfo::RequestProfilerDetach()....");
+                hr = m_pInfo->RequestProfilerDetach(0); 
+                if (S_OK != hr) {
+                    TRACEERROR(hr, L"ICorProfilerInfo3::RequestProfilerDetach");
+                    continue;
+                }
+            }
+
+
+        }
+
+        // dwRet cannot be WAIT_ABANDONED since we are not waiting
+        // for a mutex handle. But still ...... 
+        else {
+            hr = E_FAIL;
+            continue;
+        }
+    }
+}
+
+
+HRESULT OrangeProfiler::ForceGCAsync()
+{
+    HRESULT hr = S_OK;
+    DWORD dwRet = 0;
+
+    // pre-condition checks
+    if (NULL == m_pInfo) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Failed a precondition check -> m_pInfo is NULL");
+        goto ErrReturn;
+    }
+
+    dwRet = SetEvent(m_hndWaitEvents[(DWORD) FORCEGC_EVENT_HANDLE]);
+    if (0 == dwRet) {
+        hr = HRESULT_FROM_WIN32(GetLastError());        
+        TRACEERROR(hr, L"Call to Kernel32!SetEvent failed. Unable to wake worker thread.");
+        goto ErrReturn;
+    }    
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+      
+    return hr;
+}
+
+
+HRESULT OrangeProfiler::RequestProfilerDetachAsync()
+{
+    HRESULT hr = S_OK;
+    DWORD dwRet = 0;
+
+    // pre-condition checks
+    if (NULL == m_pInfo) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Failed a precondition check -> m_pInfo is NULL");
+        goto ErrReturn;
+    }
+
+    dwRet = SetEvent(m_hndWaitEvents[(DWORD) DETACH_EVENT_HANDLE]);
+    if (0 == dwRet) {
+        hr = HRESULT_FROM_WIN32(GetLastError());        
+        TRACEERROR(hr, L"Call to Kernel32!SetEvent failed. Unable to wake worker thread.");
+        goto ErrReturn;
+    }    
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+      
+    return hr;
+}
+
+
+
+//*********************************************************************
+//  Descripton: Common routine for OrangeProfiler to initialize itself.
+//
+//  Params:     [IN] IUnknown * pICorProfilerInfoUnk
+//                  An IUnknown interface pointer which can be QI'ed 
+//                  for the ICorProfilerInfo3 interface.
+//
+//  Return:     S_OK if method successful, else appropriate error code.
+//  
+//  Notes:      This is not a profiler callback.
+//*********************************************************************
+
+HRESULT OrangeProfiler::CommonInit(IUnknown * pICorProfilerInfoUnk, void * pvClientData, UINT cbClientData)
+{    
+    HRESULT hr = S_OK;
+    USHORT usClrInstanceId = 0;
+    COR_PRF_RUNTIME_TYPE clrRuntimeType = COR_PRF_DESKTOP_CLR;
+    USHORT usClrMajorVersion = 0;
+    USHORT usClrMinorVersion = 0;
+    USHORT usClrBuildNumber = 0;
+    USHORT usClrQFEVersion = 0;
+    DWORD cchVersionString = MAX_PATH;
+    WCHAR wszClrVersionString[MAX_PATH] = {0};
+	wchar_t * wszDiagnosticInfo = NULL;
+	wchar_t * wszCaptureVirtualAddress = NULL;
+	wchar_t * wszTraceFileName = NULL;
+
+    // pre-condition check
+    if (NULL == pICorProfilerInfoUnk) {
+        hr = E_INVALIDARG;
+        TRACEERROR(hr, L"Invalid arg passed into OrangeProfiler::CommonInit -> pICorProfilerInfoUnk");
+        goto ErrReturn;
+    }
+
+    // First order of business is to determine what runtime are we dealing with here?
+    // Let us QI it for IID_ICorProfilerInfo3
+    //  - If QI passes, then it is definitely V4
+    //  - else if QI fails with E_NOINTERFACE, then it is definitely V2. Since we are
+    //    a pure V4 profiler we shall cancel activation at this point.
+    hr = pICorProfilerInfoUnk->QueryInterface(IID_ICorProfilerInfo3, (void **) & m_pInfo);
+    if (E_NOINTERFACE == hr) {
+        hr = CORPROF_E_PROFILER_CANCEL_ACTIVATION;
+        goto ErrReturn;
+    }
+    else {
+        HR_CHECK(hr, S_OK, L"QI for ICorProfilerInfo3 failed");
+        m_pInfo->AddRef();
+    }
+
+
+	// We shall now read in the following settings 
+    // - Has the user requested diagnostic logging?
+	// - Has the user specified any custom snapshot action?
+	// - Does the user choose to capture the virtual address ranges?
+	// - What is the name of the trace file to be generated?
+
+	if (m_bAttachingProfiler)
+	{
+		// TEMP CODE. Delete later
+		g_DiagnosticInfoLevel |= TRACELEVEL_DIAGNOSTIC; // temp
+
+		//AttachingProfilerOptions * opts = (AttachingProfilerOptions*) pvClientData;
+		//DIAGNOSTIC(L"%s", opts->wszDiagnosticInfo);
+		//DIAGNOSTIC(L"%s", opts->wszCaptureVirtualAddress);
+		//DIAGNOSTIC(L"%s", opts->wszTraceFileName);
+		//DIAGNOSTIC(L"%s", opts->wszCustomSnapshotAction);
+
+		// END OF TEMP CODE. Delete later
+	}
+	else
+	{
+	    wszDiagnosticInfo = _wgetenv(L"OP_ENABLE_DIAGNOSTIC_INFO");
+	    m_wszCustomSnapshotAction = _wgetenv(L"OP_CUSTOM_SNAPSHOT_ACTION");
+	    wszCaptureVirtualAddress = _wgetenv(L"OP_DUMP_VIRTUAL_ADDRESS");
+	    wszTraceFileName = _wgetenv(L"OP_TRACE_FILE_NAME");
+	}
+
+	if (NULL != wszDiagnosticInfo)
+    {
+        if (0 == wcscmp(wszDiagnosticInfo, L"1"))
+            g_DiagnosticInfoLevel |= TRACELEVEL_DIAGNOSTIC;
+    }
+    DIAGNOSTIC(L"g_DiagnosticInfoLevel = 0x%X", g_DiagnosticInfoLevel);
+
+    if (NULL != m_wszCustomSnapshotAction)
+        m_dwOptions |= CUSTOM_SNAPSHOT_ACTION;
+    DIAGNOSTIC(L"Custom snapshot action: %s", m_wszCustomSnapshotAction);
+
+    if (NULL != wszCaptureVirtualAddress) 
+    {
+        if (0 == wcscmp(wszCaptureVirtualAddress, L"1"))
+            m_dwOptions |= DUMP_VADUMP;
+    }
+    DIAGNOSTIC(L"m_dwOptions = 0x%X", m_dwOptions);
+
+	if (NULL == wszTraceFileName)
+        wszTraceFileName = L"orangetracefile.xml";
+	DIAGNOSTIC(L"Attempting to create trace file: %s", wszTraceFileName);
+    errno_t err = _wfopen_s(& g_pLog, wszTraceFileName, L"w+");
+	if (!err) {   
+		DIAGNOSTIC(L"Successfully created trace file: %s", wszTraceFileName);
+	}
+	else {
+		DIAGNOSTIC(L"Failed to create trace file. errno = %d", err);
+	}
+
+
+	TRACE(L"<trace type=\"\">");
+
+    // let us now retrieve the detailed version info via the profiling API.
+    hr = m_pInfo->GetRuntimeInformation(
+            & usClrInstanceId, 
+            & clrRuntimeType, 
+            & usClrMajorVersion, 
+            & usClrMinorVersion,
+            & usClrBuildNumber, 
+            & usClrQFEVersion, 
+            cchVersionString, 
+            & cchVersionString,
+            wszClrVersionString);
+    HR_CHECK(hr, S_OK, L"ICorProfilerInfo3::GetRuntimeInformation");
+
+	TRACE(L"<header>");
+	TRACE(L"<system is64bit=\"%d\"/>", (m_bIsWOW64Process || 0 == m_sysInfo.wProcessorArchitecture) ?0 :1);
+	TRACE(L"<process pid=\"%d\" name=\"%s\" path=\"%s\"/>", m_dwPid, m_wszFileName, m_wszFilePath);
+    TRACE(L"<runtime instanceid=\"%d\" type=\"%s\" versionstring=\"%s\" majorversion=\"%d\" minorversion=\"%d\" build=\"%d\" qfeversion=\"%d\"/>", 
+              usClrInstanceId, 
+              m_helper.GetRuntimeTypeString(clrRuntimeType),
+              wszClrVersionString,
+              usClrMajorVersion,
+              usClrMinorVersion,
+              usClrBuildNumber,
+              usClrQFEVersion);
+	TRACE(L"</header>");
+
+    // Create auto-reset events that will notify the worker thread to 
+    // - trigger GC or 
+    // - detach the profiler
+    for (int i = 0; i < SENTINEL_HANDLE; i++)
+    {
+        m_hndWaitEvents[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (NULL == m_hndWaitEvents[i]) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            TRACEERROR(hr, L"Call to Kernel32!CreateEvent failed.");
+            goto ErrReturn;
+        }
+    }
+
+    // initialize the worker thread
+    m_hndWorkerThread = (HANDLE) _beginthreadex(
+                                        NULL,
+                                        0,
+                                        & ForceGCThreadStub,
+                                        (void *) this,
+                                        0,
+                                        (unsigned int*) & m_dwWorkerThreadId);
+                                        
+    if (0 == m_hndWorkerThread) {
+        hr = E_FAIL;
+        TRACEERROR(hr, L"Call to _beginthreadex failed. Unable to spawn worker thread.");
+        goto ErrReturn;
+    }    
+
+    /////////////////////////////////////////////////////
+ErrReturn:
+
+    return hr;  
+} 
+
+
+
+    //*********************************************************************
+    //  Descripton: Profiler intialize callback. 
+    //  
+    //  Params:     [IN] IUnknown * pICorProfilerInfoUnk
+    //                  An IUnknown interface pointer which can be QI'ed 
+    //                  for the ICorProfilerInfo3 interface.
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::Initialize(IUnknown * pICorProfilerInfoUnk)
+    {
+		Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;
+		DWORD dwEventMask = COR_PRF_USE_PROFILE_IMAGES;
+
+		DIAGNOSTIC(L"Received profiler Initialize() notification.");
+
+        // pre-condition checks
+        if (NULL != m_pInfo) {
+            hr = E_FAIL;
+            TRACEERROR(hr, L"Failed a precondition check -> m_pInfo was expected to be NULL");
+            goto ErrReturn;
+        }
+
+		m_bAttachingProfiler = false;
+
+        hr = CommonInit(pICorProfilerInfoUnk, 0, 0);
+        HR_CHECK(hr, S_OK, L"OrangeProfiler::CommonInit");
+
+		if (m_dwOptions & DUMP_HEAP)
+		{
+        	dwEventMask |= COR_PRF_MONITOR_GC;
+		}
+
+        hr = m_pInfo->SetEventMask(dwEventMask);
+        HR_CHECK(hr, S_OK, L"ICorProfilerInfo3::SetEventMask");
+
+		DIAGNOSTIC(L"Profiler event mask set to 0x%X.", dwEventMask);
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+        
+    HRESULT __stdcall OrangeProfiler::InitializeForAttach(IUnknown * pICorProfilerInfoUnk, void * pvClientData, UINT cbClientData)
+    {
+		Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;
+		DWORD dwEventMask = 0;
+
+		DIAGNOSTIC(L"Received profiler InitializeForAttach() notification.");
+
+        // pre-condition checks
+        if (NULL != m_pInfo) {
+            hr = E_FAIL;
+            TRACEERROR(hr, L"Failed a precondition check -> m_pInfo was expected to be NULL");
+            goto ErrReturn;
+        }
+
+		m_bAttachingProfiler = true;
+
+        hr = CommonInit(pICorProfilerInfoUnk, pvClientData, cbClientData);
+        HR_CHECK(hr, S_OK, L"OrangeProfiler::CommonInit");
+
+		if (m_dwOptions & DUMP_HEAP)
+		{
+        	dwEventMask |= COR_PRF_MONITOR_GC;
+		}
+
+        hr = m_pInfo->SetEventMask(dwEventMask);
+        HR_CHECK(hr, S_OK, L"ICorProfilerInfo3::SetEventMask");
+
+		DIAGNOSTIC(L"Profiler event mask set to 0x%X.", dwEventMask);
+
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::Shutdown()
+    {
+		Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+        
+		DIAGNOSTIC(L"Received profiler Shutdown() notification.");
+    	TRACE(L"</trace>");
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+       
+    HRESULT __stdcall OrangeProfiler::ProfilerAttachComplete()
+    {
+		Synchronize guard(& m_cs);
+        TRACE(L"<pac tid=\"0x%X\">", GetCurrentThreadId());
+        /////////////////////////////////////////////////////
+        
+        HRESULT hr = S_OK;
+
+		DIAGNOSTIC(L"Received profiler ProfilerAttachComplete() notification.");
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+
+        TRACE(L"</pac>");
+        return S_OK;
+    }
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ProfilerDetachSucceeded()
+    {
+		Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+        
+		DIAGNOSTIC(L"Received profiler ProfilerDetachSucceeded() notification.");
+    	TRACE(L"</trace>");
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AppDomainCreationFinished(
+      AppDomainID appDomainId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AppDomainCreationStarted(
+      AppDomainID appDomainId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AppDomainShutdownFinished(
+      AppDomainID appDomainId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AppDomainShutdownStarted(
+      AppDomainID appDomainId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AssemblyLoadFinished(
+      AssemblyID assemblyId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AssemblyLoadStarted(
+      AssemblyID assemblyId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AssemblyUnloadFinished(
+      AssemblyID assemblyId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::AssemblyUnloadStarted(
+      AssemblyID assemblyId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ClassLoadFinished(
+      ClassID classId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ClassLoadStarted(
+      ClassID classId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ClassUnloadFinished(
+      ClassID classId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ClassUnloadStarted(
+      ClassID classId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::COMClassicVTableCreated(
+      ClassID wrappedClassId,
+      REFGUID implementedIID,
+      void * pVTable,
+      ULONG cSlots
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::COMClassicVTableDestroyed(
+      ClassID wrappedClassId,
+      REFGUID implementedIID,
+      void * pVTable
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionCatcherEnter(
+      FunctionID functionId,
+      ObjectID objectId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionCatcherLeave(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionCLRCatcherExecute(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionCLRCatcherFound(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionOSHandlerEnter(
+      UINT_PTR __unused
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionOSHandlerLeave(
+      UINT_PTR __unused
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionSearchCatcherFound(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionSearchFunctionEnter(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionSearchFunctionLeave(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionSearchFilterEnter(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionSearchFilterLeave(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionThrown(
+      ObjectID thrownObjectId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionUnwindFinallyEnter(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionUnwindFinallyLeave(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionUnwindFunctionEnter(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ExceptionUnwindFunctionLeave(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::FunctionUnloadStarted(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITCachedFunctionSearchFinished(
+      FunctionID functionId,
+      COR_PRF_JIT_CACHE result
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITCachedFunctionSearchStarted(
+      FunctionID functionId,
+      BOOL * pbUseCachedFunction
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITCompilationFinished(
+      FunctionID functionId,
+      HRESULT hrStatus,
+      BOOL fIsSafeToBlock
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITCompilationStarted(
+      FunctionID functionId,
+      BOOL fIsSafeToBlock
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITFunctionPitched(
+      FunctionID functionId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::JITInlining(
+      FunctionID callerId,
+      FunctionID calleeId,
+      BOOL * pfShouldInline
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ManagedToUnmanagedTransition(
+      FunctionID functionId,
+      COR_PRF_TRANSITION_REASON reason
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ModuleAttachedToAssembly(
+      ModuleID moduleId,
+      AssemblyID AssemblyId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+      
+    HRESULT __stdcall OrangeProfiler::ModuleLoadFinished(
+      ModuleID moduleId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ModuleLoadStarted(
+      ModuleID moduleId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ModuleUnloadFinished(
+      ModuleID moduleId,
+      HRESULT hrStatus
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ModuleUnloadStarted(
+      ModuleID moduleId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ObjectAllocated(
+      ObjectID objectId,
+      ClassID classId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ObjectsAllocatedByClass(
+      ULONG cClassCount,
+      ClassID classIds[],
+      ULONG cObjects[]
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ThreadCreated(
+      ThreadID threadId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ThreadDestroyed(
+      ThreadID threadId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ThreadAssignedToOSThread(
+      ThreadID managedThreadId,
+      DWORD osThreadId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingClientInvocationStarted(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingClientSendingMessage(
+      GUID * pCookie,
+      BOOL fIsAsync
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingClientReceivingReply(
+      GUID * pCookie,
+      BOOL fIsAsync
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingClientInvocationFinished(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingServerReceivingMessage(
+      GUID * pCookie,
+      BOOL fIsAsync
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingServerInvocationStarted(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingServerInvocationReturned(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RemotingServerSendingReply(
+      GUID * pCookie,
+      BOOL fIsAsync
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::UnmanagedToManagedTransition(
+      FunctionID functionId,
+      COR_PRF_TRANSITION_REASON reason
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeSuspendStarted(
+      COR_PRF_SUSPEND_REASON suspendReason
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeSuspendFinished(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeSuspendAborted(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeResumeStarted(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeResumeFinished(
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeThreadSuspended(
+      ThreadID threadId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RuntimeThreadResumed(
+      ThreadID threadId
+      )
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RootReferences(
+      ULONG    cRootRefs,
+      ObjectID rootRefIds[]
+      )
+    {
+        return S_OK;
+    }
+
+    // ICorProfilerCallBack2 Implementation
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ThreadNameChanged(
+      ThreadID managedThreadId,
+      ULONG cchName,
+      WCHAR name[]
+      )   
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::GarbageCollectionStarted(int cGenerations, BOOL generationCollected[], COR_PRF_GC_REASON reason)
+    {
+        Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;    
+
+		DIAGNOSTIC(L"Received profiler GarbageCollectionStarted() notification.");
+
+        // pre-condition checks
+        if (NULL == m_pInfo) {
+            hr = E_FAIL;
+            TRACEERROR(hr, L"Failed a precondition check -> m_pInfo is NULL");
+            goto ErrReturn;
+        }
+
+        int i = COR_PRF_GC_GEN_0;
+        for (; i < cGenerations /* <= COR_PRF_GC_LARGE_OBJECT_HEAP*/; i++)
+        {
+            if (FALSE == generationCollected[i])
+                break;
+        }
+        
+        DWORD m_condemnedGeneration = --i;
+
+		if (0 == m_cGCRefCnt) {
+            m_classIdLookup.clear();
+        }
+
+
+/*
+        if (0 == m_cGCRefCnt) {
+            m_mapHeapObjects.clear();
+        }
+*/
+        TRACE(L"<gc tid=\"0x%X\" refcnt=\"0x%X\" reason=\"%s\" condemned=\"0x%X\">", 
+              GetCurrentThreadId(), 
+              ++m_cGCRefCnt, 
+              m_helper.GetGarbageCollectionReasonString(reason),
+              m_condemnedGeneration);
+
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+      
+        //TRACE(L"</gcs>");
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::GarbageCollectionFinished() 
+    {
+        Synchronize guard(& m_cs);
+        /*TRACE(L"<gcf tid=\"0x%X\" refcnt=\"0x%X\">", GetCurrentThreadId(), --m_cGCRefCnt);*/ --m_cGCRefCnt;
+         /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;   
+
+		DIAGNOSTIC(L"Received profiler GarbageCollectionFinished() notification.");
+        
+
+        
+        // pre-condition checks
+        if (NULL == m_pInfo) {
+            hr = E_FAIL;
+            TRACEERROR(hr, L"Failed a precondition check -> m_pInfo is NULL");
+            goto ErrReturn;
+        }
+
+		if (0 == m_cGCRefCnt) { // i.e. no more pending GCs.........
+			m_classIdLookup.clear();
+        }
+
+/*
+        if (m_dwOptions & DUMP_HEAP && 0 == m_cGCRefCnt) // i.e. no more pending GCs.........
+        {
+            hr = DumpHeap();
+            HR_CHECK(hr, S_OK, L"OrangeProfiler::DumpHeap");
+
+            m_mapHeapObjects.clear();
+        }
+*/
+
+        if (m_dwOptions & DUMP_VADUMP) {
+            hr = DisplayVirtualAddressSpace();
+            HR_CHECK(hr, S_OK, L"OrangeProfiler::DisplayVirtualAddressSpace");        
+        }
+
+        if (m_dwOptions & DUMP_GENRANGES) {
+            hr = DisplayGCGenerationRanges();
+            HR_CHECK(hr, S_OK, L"OrangeProfiler::DisplayGCGenerationRanges");        
+        }
+
+
+        if (m_dwOptions & DUMP_MODULES) {
+            hr = DumpModules();
+            HR_CHECK(hr, S_OK, L"OrangeProfiler::DumpModules");        
+        }
+        
+        if (m_dwOptions & CUSTOM_SNAPSHOT_ACTION) {
+            hr = CustomSnapshotAction();
+            HR_CHECK(hr, S_OK, L"OrangeProfiler::CustomSnapshotAction");                    
+        }
+        
+
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+
+        TRACE(L"</gc>");
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::MovedReferences(
+      ULONG cMovedObjectIDRanges,
+      ObjectID oldObjectIDRangeStart[] ,
+      ObjectID newObjectIDRangeStart[] ,
+      ULONG cObjectIDRangeLength[]
+      )
+    {
+        Synchronize guard(& m_cs);
+        TRACE(L"<mr tid=\"0x%X\">", GetCurrentThreadId());
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;    
+  
+        for (int i = 0; i < cMovedObjectIDRanges; i++)
+        {
+            
+            TRACE(L"<range os=\"0x%X\" oe=\"0x%X\" ns=\"0x%X\" ne=\"0x%X\"/>", 
+                  oldObjectIDRangeStart[i], 
+                  oldObjectIDRangeStart[i] + cObjectIDRangeLength[i],
+                  newObjectIDRangeStart[i], 
+                  newObjectIDRangeStart[i] + cObjectIDRangeLength[i]);
+            
+            //m_mapHeapObjects[newObjectIDRangeStart[i]] = cObjectIDRangeLength[i];
+        }
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+
+        TRACE(L"</mr>");
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      - The SurvivingReferences callbacks is sent out only 
+    //              for non-compacting collections.
+    //
+    //              - Multiple SurvivingReferences callbacks might be 
+    //              received during a particular garbage collection, due to 
+    //              limited internal buffering, multiple threads reporting in 
+    //              the case of server garbage collection, and other reasons. 
+    //              In the case of multiple callbacks during a garbage collection, 
+    //              the information is cumulative — all references that are 
+    //              reported in any SurvivingReferences callback survive the 
+    //              garbage collection. 
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::SurvivingReferences(ULONG cSurvivingObjectIDRanges, ObjectID objectIDRangeStart[], ULONG cObjectIDRangeLength[])
+    {
+        Synchronize guard(& m_cs);
+        TRACE(L"<sr tid=\"0x%X\">", GetCurrentThreadId());
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;    
+
+        for (int i = 0; i < cSurvivingObjectIDRanges; i++)
+        {
+            
+            TRACE(L"<range s=\"0x%X\" e=\"0x%X\"/>", objectIDRangeStart[i], objectIDRangeStart[i] + cObjectIDRangeLength[i]);
+            
+            //m_mapHeapObjects[objectIDRangeStart[i]] = cObjectIDRangeLength[i];
+        }
+
+        /////////////////////////////////////////////////////
+    ErrReturn:
+
+        TRACE(L"</sr>");
+        return hr;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::ObjectReferences(
+      ObjectID objectId,
+      ClassID classId,
+      ULONG cObjectRefs,
+      ObjectID objectRefIds[]
+      )
+    {
+        Synchronize guard(& m_cs);
+        /////////////////////////////////////////////////////
+
+        HRESULT hr = S_OK;    
+
+		ObjectInfo oi(objectId, m_pInfo);
+		hr = oi.Init();
+        HR_CHECK(hr, S_OK, L"ObjectInfo::Init");
+
+        TRACE(L"<or o=\"%x\" s=\"%x\" g=\"%x\" c=\"%x\">", 
+            objectId,
+            oi.m_cbObjAlignedSize,
+            oi.m_genRange.generation,
+            oi.m_ClassId /*classId*/);
+
+        for (int i = 0; i < cObjectRefs; i++)
+        {
+            TRACE(L"<r>%x</r>", objectRefIds[i]);
+        }
+
+		TRACE(L"</or>");
+
+		
+
+		// If the classId has not been encountered before, we shall dump out
+		// its information.
+		if (m_classIdLookup.end() ==  m_classIdLookup.find(oi.m_ClassId))
+		{
+			m_classIdLookup.insert(oi.m_ClassId);
+
+			ClassInfo ci(oi.m_ClassId, m_pInfo);
+	        hr = ci.Init();
+	        HR_CHECK(hr, S_OK, L"ClassInfo::Init");
+
+			// Bug Fix: Often times the type names will contain characters like '<' and '>'. 
+			// Since we are writing out the trace file in XML format, we have to replace
+			// those character with "&lt;" and "&gt;" respectively.
+			std::wstring typeName;
+			if (NULL != ci.m_wszTypeDef)
+			{
+				typeName = ci.m_wszTypeDef;
+				std::size_t index = wstring::npos;
+
+				while ((index = typeName.find(L"<")) != wstring::npos)
+					typeName.replace(index, 1, L"&lt;");
+				while ((index = typeName.find(L">")) != wstring::npos)
+					typeName.replace(index, 1, L"&gt;");
+			}
+
+			TRACE(L"<c i=\"%x\" n=\"%s\" m=\"%x\" />", oi.m_ClassId, (NULL == ci.m_wszTypeDef) ? L"[UNKNOWN]" : typeName.c_str(), ci.m_ModuleId);
+		}
+		
+        /////////////////////////////////////////////////////
+    ErrReturn:
+
+        return hr;
+    }
+
+
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::FinalizeableObjectQueued(DWORD finalizerFlags, ObjectID objectID)
+    {
+		return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::RootReferences2(
+      ULONG cRootRefs,
+      ObjectID rootRefIds[],
+      COR_PRF_GC_ROOT_KIND rootKinds[],
+      COR_PRF_GC_ROOT_FLAGS rootFlags[],
+      UINT_PTR rootIds[]
+      )
+    {
+        Synchronize guard(& m_cs);
+
+		for (int i = 0; i < cRootRefs; i++)
+        {
+            TRACE(L"<rr re=\"%x\" ro=\"%x\" rk=\"%x\" rf=\"%x\"/>", rootRefIds[i], rootIds[i], rootKinds[i], rootFlags[i]);
+        }
+
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::HandleCreated(GCHandleID handleId, ObjectID initialObjectId)
+    {
+        return S_OK;
+    }
+
+
+    //*********************************************************************
+    //  Descripton: 
+    //  
+    //  Params:     
+    //
+    //  Return:     S_OK if method successful, else appropriate error code.
+    //  
+    //  Notes:      n/a
+    //*********************************************************************
+
+    HRESULT __stdcall OrangeProfiler::HandleDestroyed(GCHandleID handleId)
+    {
+        return S_OK;
+    }
+
