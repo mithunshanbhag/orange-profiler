@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 // Win32Wrapper.cs  : PInvoke wrappers for commonly used Win32 Methods.                  //
 // Application      : CLR V4 DST Test Infrastructure                                     //
-// Author           : Mithun Shanbhag, mithuns@microsoft.com                             //
+// Author           : Mithun Shanbhag                                                    //
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 

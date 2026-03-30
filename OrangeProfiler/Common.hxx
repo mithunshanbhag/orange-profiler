@@ -2,7 +2,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////
 // Common.hxx  - Includes necessary headers and defines global configuration options. //
 // Application - Orange Profiler.                                                     //
-// Author      - Mithun Shanbhag, mithuns@microsoft.com                               //
+// Author      - Mithun Shanbhag                                                      //
 ////////////////////////////////////////////////////////////////////////////////////////
 
 #include <windows.h>

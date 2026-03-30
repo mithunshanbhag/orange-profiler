@@ -4,8 +4,8 @@
 //				 parser (SigParser) by deriving a new class from it and overriding 	//
 //				 the virtuals.                  									//
 // Application - Orange Profiler.                                                   //
-// Author      - (Probably) David Broman, DavBr@microsoft.com						//
-// 			   - Heavily modified by Mithun Shanbhag, mithuns@microsoft.com			//
+// Author      - (Probably) David Broman						                    //
+// 			   - Heavily modified by Mithun Shanbhag                       			//
 //////////////////////////////////////////////////////////////////////////////////////
 
 

@@ -4,7 +4,7 @@
 //                    that this profiler receives. Apart from that we also  //
 //                    track other events for interest (esp GC events).      //
 // Application      - Orange Profiler.                                      //
-// Author           - Mithun Shanbhag, mithuns@microsoft.com                //
+// Author           - Mithun Shanbhag                                       //
 //////////////////////////////////////////////////////////////////////////////
 
 

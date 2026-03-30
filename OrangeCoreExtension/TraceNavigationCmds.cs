@@ -2,7 +2,7 @@
 // TraceNavigationCmds.cs : Implements commands to load/unload trace files   //
 //                           and navigate through snapshots in the trace.    //
 // Application            : CLR V4 Profiler Test Infrastructure              //
-// Author                 : Mithun Shanbhag, mithuns@microsoft.com           //
+// Author                 : Mithun Shanbhag                                  //
 ///////////////////////////////////////////////////////////////////////////////
 
 using System;

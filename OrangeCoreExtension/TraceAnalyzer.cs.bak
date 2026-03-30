@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 // TraceNavigator.cs : Implements commands to navigate through a trace file. //
 // Application       : CLR V4 Profiler Test Infrastructure                   //
-// Author            : Mithun Shanbhag, mithuns@microsoft.com                //
+// Author            : Mithun Shanbhag                                       //
 ///////////////////////////////////////////////////////////////////////////////
 
 using System;

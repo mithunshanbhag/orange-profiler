@@ -2,7 +2,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////
 // EntityInfo.h	- Gets detailed info on entities like Objects, classes, fields etc.   //
 // Application 	- Orange Profiler.                                                    //
-// Author      	- Mithun Shanbhag, mithuns@microsoft.com                              //
+// Author      	- Mithun Shanbhag                                                     //
 ////////////////////////////////////////////////////////////////////////////////////////
 
 #include "common.hxx"

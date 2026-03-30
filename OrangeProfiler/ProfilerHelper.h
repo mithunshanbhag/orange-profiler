@@ -2,7 +2,7 @@
 //////////////////////////////////////////////////////////////////////
 // ProfilerHelper.h	- Includes some useful helper routines. 		//
 // Application 		- Orange Profiler.                              //
-// Author      		- Mithun Shanbhag, mithuns@microsoft.com        //
+// Author      		- Mithun Shanbhag                                  //
 //////////////////////////////////////////////////////////////////////
 
 #include "common.hxx"

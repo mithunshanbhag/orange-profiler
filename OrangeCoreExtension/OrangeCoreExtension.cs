@@ -3,7 +3,7 @@
 //                            when it starts up. It defines some very basic commands like -      //
 //                            "help", "load", "mode", "config", "script" etc.                    //
 // Application              : CLR V4 Profiler Test Infrastructure                                //
-// Author                   : Mithun Shanbhag, mithuns@microsoft.com                             //
+// Author                   : Mithun Shanbhag                                                    //
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -96,7 +96,7 @@ namespace OrangeClient
     //----< class OrangeCoreExtension >----//
     /////////////////////////////////////////
 
-    [ExtensionDescription(AuthorEmail="mithuns@microsoft.com", AuthorName="Mithun Shanbhag")]
+    [ExtensionDescription(AuthorEmail="mithun@xyz.com", AuthorName="Mithun Shanbhag")]
     public sealed partial class OrangeCoreExtension
     {
         ///////////////////////////////////

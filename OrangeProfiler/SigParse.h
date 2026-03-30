@@ -3,8 +3,8 @@
 // SigParse.h  - General-purpose signature parser. Adheres to Microsoft's implementation //
 //				 of the ECMA spec.                  									 //
 // Application - Orange Profiler.                                                   	 //
-// Author      - (Originally written by) Rico Mariani, RicoM@microsoft.com				 //
-// 			   - Heavily modified by Mithun Shanbhag, mithuns@microsoft.com				 //
+// Author      - (Originally written by) Rico Mariani                                    //
+// 			   - Heavily modified by Mithun Shanbhag                       				 //
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -91,7 +91,7 @@ Number ::= 29-bit-encoded-integer
 #define ELEMENT_TYPE_VALUETYPE 0x11 // Followed by TypeDef or TypeRef token
 #define ELEMENT_TYPE_CLASS 0x12 // Followed by TypeDef or TypeRef token
 #define ELEMENT_TYPE_VAR 0x13 // Generic parameter in a generic type definition, represented as number
-#define ELEMENT_TYPE_ARRAY 0x14 // type rank boundsCount bound1 … loCount lo1 …
+#define ELEMENT_TYPE_ARRAY 0x14 // type rank boundsCount bound1 ï¿½ loCount lo1 ï¿½
 #define ELEMENT_TYPE_GENERICINST 0x15 // Generic type instantiation. Followed by type type-arg-count type-1 ... type-n
 #define ELEMENT_TYPE_TYPEDBYREF 0x16
 #define ELEMENT_TYPE_I 0x18 // System.IntPtr
@@ -104,7 +104,7 @@ Number ::= 29-bit-encoded-integer
 #define ELEMENT_TYPE_CMOD_REQD 0x1f // Required modifier : followed by a TypeDef or TypeRef token
 #define ELEMENT_TYPE_CMOD_OPT 0x20 // Optional modifier : followed by a TypeDef or TypeRef token
 #define ELEMENT_TYPE_INTERNAL 0x21 // Implemented within the CLI
-#define ELEMENT_TYPE_MODIFIER 0x40 // Or’d with following element types
+#define ELEMENT_TYPE_MODIFIER 0x40 // Orï¿½d with following element types
 #define ELEMENT_TYPE_SENTINEL 0x41 // Sentinel for vararg method signature
 #define ELEMENT_TYPE_PINNED 0x45 // Denotes a local variable that points at a pinned object
 

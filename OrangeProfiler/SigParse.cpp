@@ -1,8 +1,8 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 // SigParse.h  - Implementation of the General-purpose signature parser. 				 //
 // Application - Orange Profiler.                                                   	 //
-// Author      - (Originally written by) Rico Mariani, RicoM@microsoft.com				 //
-// 			   - Heavily modified by Mithun Shanbhag, mithuns@microsoft.com				 //
+// Author      - (Originally written by) Rico Mariani                   				 //
+// 			   - Heavily modified by Mithun Shanbhag                       				 //
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 

@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 // COMGoo.cpp  - Code for dealing with COM component registration.                  //
 // Application - Orange Profiler.                                                   //
-// Author      - Mithun Shanbhag, mithuns@microsoft.com                             //
+// Author      - Mithun Shanbhag                                                    //
 //               This is a heavily modified version of Dale Rogerson's sample code  //
 //               provided in his book "Inside COM" (MS Press).                      //
 //////////////////////////////////////////////////////////////////////////////////////

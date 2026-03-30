@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 // CorProfWrapper.cs: Managed wrappers for structures, enums in CorProf.IDL file.        //
 // Application      : CLR V4 DST Test Infrastructure                                     //
-// Author           : Mithun Shanbhag, mithuns@microsoft.com                             //
+// Author           : Mithun Shanbhag                                                    //
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 

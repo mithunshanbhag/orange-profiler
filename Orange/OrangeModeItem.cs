@@ -1,7 +1,7 @@
 ﻿///////////////////////////////////////////////////////////////////////////////
 // OrangeModes.cs   : Introduces several tweakable modes.                    //
 // Application      : CLR V4 DST Test Infrastructure                         //
-// Author           : Mithun Shanbhag, mithuns@microsoft.com                 //
+// Author           : Mithun Shanbhag                                        //
 //                    Some parts of this module have been lifted directly    //
 //                    from the MDbg sources.                                 //
 ///////////////////////////////////////////////////////////////////////////////

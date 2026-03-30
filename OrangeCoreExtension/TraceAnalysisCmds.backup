@@ -2,7 +2,7 @@
 // TraceAnalysisCmds.cs : Implements commands to analyze snapshots in        //
 //                        a given trace file.                                //
 // Application          : CLR V4 Profiler Test Infrastructure                //
-// Author               : Mithun Shanbhag, mithuns@microsoft.com             //
+// Author               : Mithun Shanbhag                                    //
 ///////////////////////////////////////////////////////////////////////////////
 
 using System;

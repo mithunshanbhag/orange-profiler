@@ -1,7 +1,7 @@
 ﻿//////////////////////////////////////////////////////////////////////////////
 // OrangeExtension.cs :                                                     //
 // Application        : CLR V4 Profiler Test Infrastructure                 //
-// Author             : Mithun Shanbhag, mithuns@microsoft.com              //
+// Author             : Mithun Shanbhag                                     //
 //                      Some parts of this module have been lifted directly //
 //                      from the MDbg sources.                              //
 //////////////////////////////////////////////////////////////////////////////

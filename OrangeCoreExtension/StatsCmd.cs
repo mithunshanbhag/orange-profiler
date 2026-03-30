@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 // StatsCmd.cs : Implements the "callbackstats" command.                     //
 // Application : CLR V4 Profiler Test Infrastructure                         //
-// Author      : Mithun Shanbhag, mithuns@microsoft.com                      //
+// Author      : Mithun Shanbhag                                             //
 ///////////////////////////////////////////////////////////////////////////////
 
 using System;

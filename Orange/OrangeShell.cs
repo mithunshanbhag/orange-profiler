@@ -3,7 +3,7 @@
 //                    interprets and executes them. Also responsible for     // 
 //                    logging output to console and to log file.             //
 // Application      : CLR V4 DST Test Infrastructure                         //
-// Author           : Mithun Shanbhag, mithuns@microsoft.com                 //
+// Author           : Mithun Shanbhag                                        //
 //                    Some parts of this module have been lifted directly    //
 //                    from the MDbg sources.                                 //
 ///////////////////////////////////////////////////////////////////////////////

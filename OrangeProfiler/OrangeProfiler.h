@@ -1,7 +1,7 @@
 #pragma once
 //////////////////////////////////////////////////////////////////////////
 // Application      - Orange Profiler.                                  //
-// Author           - Mithun Shanbhag, mithuns@microsoft.com            //
+// Author           - Mithun Shanbhag                                   //
 //////////////////////////////////////////////////////////////////////////
 
 /*

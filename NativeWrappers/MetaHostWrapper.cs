@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 // MetaHostStuff.cs : Managed definitions for the Metahost COM Interfaces.               //
 // Application      : CLR V4 DST Test Infrastructure                                     //
-// Author           : Mithun Shanbhag, mithuns@microsoft.com                             //
+// Author           : Mithun Shanbhag                                                    //
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 
