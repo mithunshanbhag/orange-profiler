@@ -1,6 +1,6 @@
 # 🍊 Orange Profiler
 
-> ⚠️ **Legacy codebase ahead:** this project appears to have been created around **2008-2009** — roughly **18 years ago**. It has real historical value, but it is **not guaranteed to work** on modern machines without extra setup or fixes.
+> ⚠️ **Legacy codebase ahead:** this project was created around **2008-2009** — roughly **18 years ago**. It has real historical value, but it is **not guaranteed to work** on modern machines without extra setup or fixes.
 
 > 🛠️ The long-term intent is to **modernize and update this codebase for the current .NET runtime** and a more current Windows development toolchain.
 
